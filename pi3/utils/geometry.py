@@ -8,21 +8,24 @@ def se3_inverse(T):
     T: Tensor of shape (B, 4, 4)
     """
     if len(T.shape) == 2:
-        T = T[None]
-        unseq_flag = True
+        T = T[None]         # 为 T 扩展一个维度 (B=1)
+        unseq_flag = True   # 用于标记是否返回单个矩阵
     else:
         unseq_flag = False
 
     if torch.is_tensor(T):
-        R = T[:, :3, :3]
-        t = T[:, :3, 3].unsqueeze(-1)
-        R_inv = R.transpose(-2, -1)
-        t_inv = -torch.matmul(R_inv, t)
+        R = T[:, :3, :3]               # 取出旋转矩阵 (左上3x3)
+        t = T[:, :3, 3].unsqueeze(-1)  # 取出平移向量 (右上3x1)
+        # 计算 T 的逆
+        R_inv = R.transpose(-2, -1)     # 旋转矩阵的逆 = 自身的转置 (正交矩阵的性质)
+        t_inv = -torch.matmul(R_inv, t) # 平移向量的逆 = -(R^{-1} x t)
+        # 将 R_inv 和 t_inv 拼接起来
         T_inv = torch.cat([
             torch.cat([R_inv, t_inv], dim=-1),
             torch.tensor([0, 0, 0, 1], device=T.device, dtype=T.dtype).repeat(T.shape[0], 1, 1)
         ], dim=1)
     else:
+        # Numpy 
         R = T[:, :3, :3]
         t = T[:, :3, 3, np.newaxis]
 
@@ -36,21 +39,35 @@ def se3_inverse(T):
         T_inv = np.concatenate([top_part, bottom_row], axis=1)
 
     if unseq_flag:
-        T_inv = T_inv[0]
-    return T_inv
+        T_inv = T_inv[0]    # 根据标记返回单个矩阵
+    return T_inv            # 返回张量
 
+
+# 根据图像宽高，返回每个像素中心点齐次坐标
 def get_pixel(H, W):
     # get 2D pixels (u, v) for image_a in cam_a pixel space
+    # u_a 表示每个像素的列坐标，v_a表示每个像素的行坐标
+    # np.meshgrid(np.arange(3), np.arange(2)) ==>
+    #   u_a = [[0, 1, 2],        v_a = [[0, 0, 0],
+    #          [0, 1, 2]]               [1, 1, 1]]
     u_a, v_a = np.meshgrid(np.arange(W), np.arange(H))
+
     # u_a = np.flip(u_a, axis=1)
     # v_a = np.flip(v_a, axis=0)
+
+    # 横纵坐标均+0.5表示像素的正中心
+    # pixels_a = [[0.5, 1.5, 2.5, 0.5, 1.5, 2.5],
+    #             [0.5, 0.5, 0.5, 1.5, 1.5, 1.5],
+    #             [1. , 1. , 1. , 1. , 1. , 1. ]]
     pixels_a = np.stack([
         u_a.flatten() + 0.5, 
         v_a.flatten() + 0.5, 
-        np.ones_like(u_a.flatten())
+        np.ones_like(u_a.flatten())     # 将坐标转为齐次形式
     ], axis=0)
     
     return pixels_a
+
+
 
 def depthmap_to_absolute_camera_coordinates(depthmap, camera_intrinsics, camera_pose, z_far=0, **kw):
     """
@@ -60,18 +77,22 @@ def depthmap_to_absolute_camera_coordinates(depthmap, camera_intrinsics, camera_
         - camera_pose: a 4x3 or 4x4 cam2world matrix
     Returns:
         pointmap of absolute coordinates (HxWx3 array), and a mask specifying valid pixels."""
+    # 根据深度和相机内参获取 3D点云 X_cam 和有效性掩码 valid_mask
     X_cam, valid_mask = depthmap_to_camera_coordinates(depthmap, camera_intrinsics)
+    # 如果 z_far > 0，则同时过滤超远点
     if z_far > 0:
         valid_mask = valid_mask & (depthmap < z_far)
 
     X_world = X_cam # default
+    # 如果提供了相机位姿，则执行坐标变换
     if camera_pose is not None:
         # R_cam2world = np.float32(camera_params["R_cam2world"])
         # t_cam2world = np.float32(camera_params["t_cam2world"]).squeeze()
-        R_cam2world = camera_pose[:3, :3]
-        t_cam2world = camera_pose[:3, 3]
+        R_cam2world = camera_pose[:3, :3]   # 提取旋转矩阵
+        t_cam2world = camera_pose[:3, 3]    # 提取平移矩阵
 
         # Express in absolute coordinates (invalid depth values)
+        # 沿k维度执行点积运算 (R @ 每个点的三维坐标向量)，然后再平移
         X_world = np.einsum("ik, vuk -> vui", R_cam2world, X_cam) + t_cam2world[None, None, :]
 
     return X_world, valid_mask
@@ -92,6 +113,7 @@ def depthmap_to_camera_coordinates(depthmap, camera_intrinsics, pseudo_focal=Non
     # Strong assumption: there are no skew terms
     # assert camera_intrinsics[0, 1] == 0.0
     # assert camera_intrinsics[1, 0] == 0.0
+    # 从内参矩阵中提取焦距 fu,fv 和主点 cu,cv
     if pseudo_focal is None:
         fu = camera_intrinsics[0, 0]
         fv = camera_intrinsics[1, 1]
@@ -101,18 +123,24 @@ def depthmap_to_camera_coordinates(depthmap, camera_intrinsics, pseudo_focal=Non
     cu = camera_intrinsics[0, 2]
     cv = camera_intrinsics[1, 2]
 
+    # 获取每个像素点中心的齐次坐标
     u, v = np.meshgrid(np.arange(W), np.arange(H))
+    # 将深度图作为每个像素点的z坐标
     z_cam = depthmap
+    # 反投影公式
     x_cam = (u - cu) * z_cam / fu
     y_cam = (v - cv) * z_cam / fv
+    # 将三个维度的坐标拼接起来 --> (H,W,3)
     X_cam = np.stack((x_cam, y_cam, z_cam), axis=-1).astype(np.float32)
 
     # Mask for valid coordinates
-    valid_mask = (depthmap > 0.0)
+    valid_mask = (depthmap > 0.0)  # 过滤深度 <= 0 的点
     # Invalid any depth > 80m
     valid_mask = valid_mask
     return X_cam, valid_mask
 
+
+# 将三维坐标转为齐次形式
 def homogenize_points(
     points,
 ):
@@ -127,6 +155,7 @@ def get_gt_warp(depth1, depth2, T_1to2, K1, K2, depth_interpolation_mode = 'bili
     else:
         B = depth1.shape[0]
     with torch.no_grad():
+        # 创建一个 [-1,1]x[-1,1] 内的坐标网格
         x1_n = torch.meshgrid(
             *[
                 torch.linspace(
@@ -136,6 +165,7 @@ def get_gt_warp(depth1, depth2, T_1to2, K1, K2, depth_interpolation_mode = 'bili
             ],
             indexing = 'ij'
         )
+        # 将 x1_n 变形为 (B, H * W, 2)
         x1_n = torch.stack((x1_n[2], x1_n[1]), dim=-1).reshape(B, H * W, 2)
         mask, x2 = warp_kpts(
             x1_n.double(),
@@ -327,11 +357,15 @@ def inv(mat):
         return np.linalg.inv(mat)
     raise ValueError(f'bad matrix type = {type(mat)}')
 
+
+
 def opencv_camera_to_plucker(poses, K, H, W):
     device = poses.device
     B = poses.shape[0]
 
+    # 根据图像宽高获取每个像素中心点坐标，然后在 batch 维度复制 B 份
     pixel = torch.from_numpy(get_pixel(H, W).astype(np.float32)).to(device).T.reshape(H, W, 3)[None].repeat(B, 1, 1, 1)         # (3, H, W)
+    
     pixel = torch.einsum('bij, bhwj -> bhwi', torch.inverse(K), pixel)
     ray_directions = torch.einsum('bij, bhwj -> bhwi', poses[..., :3, :3], pixel)
 
@@ -344,6 +378,8 @@ def opencv_camera_to_plucker(poses, K, H, W):
     return plucker_ray
 
 
+
+# 提取深度图的边缘，只要某像素与其邻域内深度差异超过给定阈值，就标记为 True
 def depth_edge(depth: torch.Tensor, atol: float = None, rtol: float = None, kernel_size: int = 3, mask: torch.Tensor = None) -> torch.BoolTensor:
     """
     Compute the edge mask of a depth map. The edge is defined as the pixels whose neighbors have a large difference in depth.
@@ -362,14 +398,17 @@ def depth_edge(depth: torch.Tensor, atol: float = None, rtol: float = None, kern
         mask = mask.reshape(-1, 1, *shape[-2:])
 
     if mask is None:
+        # max_pool2d(depth...获取局部窗口最大值，max_pool2d(-depth...获取局部窗口最小值的负数
+        # 两者相加 ===> max_local - min_local = 局部极差
         diff = (F.max_pool2d(depth, kernel_size, stride=1, padding=kernel_size // 2) + F.max_pool2d(-depth, kernel_size, stride=1, padding=kernel_size // 2))
     else:
+        # 将 mask 中 =False 的位置设为 -inf，保证无效像素不参与运算
         diff = (F.max_pool2d(torch.where(mask, depth, -torch.inf), kernel_size, stride=1, padding=kernel_size // 2) + F.max_pool2d(torch.where(mask, -depth, -torch.inf), kernel_size, stride=1, padding=kernel_size // 2))
 
     edge = torch.zeros_like(depth, dtype=torch.bool)
     if atol is not None:
-        edge |= diff > atol
+        edge |= diff > atol                             # 绝对差值查过 atol 的标记为 edge 
     if rtol is not None:
-        edge |= (diff / depth).nan_to_num_() > rtol
-    edge = edge.reshape(*shape)
+        edge |= (diff / depth).nan_to_num_() > rtol     # 相对差值超过 rtol 的标记为 edge 
+    edge = edge.reshape(*shape)     # 重新reshape为原来深度图的形状
     return edge

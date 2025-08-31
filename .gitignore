@@ -16,6 +16,7 @@ ckpts
 /data
 /logs
 /outputs
+input_images*/
 
 resize_demo_imgs.py
 img_dir_to_video.py

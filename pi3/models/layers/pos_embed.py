@@ -104,7 +104,7 @@ def interpolate_pos_embed(model, checkpoint_model):
 #----------------------------------------------------------
 
 try:
-    from models.curope import cuRoPE2D
+    from models.curope import cuRoPE2D          # Not compatible with the model (since Fast3R) --- wh 8/9/2025
     RoPE2D = cuRoPE2D
 except ImportError:
     print('Warning, cannot find cuda-compiled version of RoPE2D, using a slow pytorch version instead')
@@ -170,5 +170,6 @@ class PositionGetter(object):
             x = torch.arange(w, device=device)
             y = torch.arange(h, device=device)
             self.cache_positions[h,w] = torch.cartesian_prod(y, x) # (h, w, 2)
+        # 在 batch 维度扩展 b 份
         pos = self.cache_positions[h,w].view(1, h*w, 2).expand(b, -1, 2).clone()
         return pos

@@ -6,6 +6,8 @@ from functools import partial
 from torch.utils.checkpoint import checkpoint
 import torch.nn.functional as F
    
+
+
 class TransformerDecoder(nn.Module):
     def __init__(
         self,
@@ -55,6 +57,8 @@ class TransformerDecoder(nn.Module):
         out = self.linear_out(hidden)
         return out
 
+
+# 使用线性层对隐变量进行变换，得到原始图像分辨率的特征 (B, output_dim, H, W)
 class LinearPts3d (nn.Module):
     """ 
     Linear head for dust3r
@@ -65,17 +69,21 @@ class LinearPts3d (nn.Module):
         super().__init__()
         self.patch_size = patch_size
 
+        # 线性层输入维度 --> 解码器嵌入维度；
+        # 线性层输出维度 --> 3 * pathch点数；
         self.proj = nn.Linear(dec_embed_dim, (output_dim)*self.patch_size**2)
 
     def forward(self, decout, img_shape):
         H, W = img_shape
         tokens = decout[-1]
-        B, S, D = tokens.shape
+        B, S, D = tokens.shape  
 
         # extract 3D points
         feat = self.proj(tokens)  # B,S,D
+        # 先将形状变为BDS，再 reshape
         feat = feat.transpose(-1, -2).view(B, -1, H//self.patch_size, W//self.patch_size)
+        # 使用 pixel_shuffle 得到原始图像分辨率大小的特征图
         feat = F.pixel_shuffle(feat, self.patch_size)  # B,3,H,W
 
-        # permute + norm depth
+        # permute --> B,H,W,3
         return feat.permute(0, 2, 3, 1)

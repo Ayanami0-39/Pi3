@@ -24,20 +24,21 @@ class Pi3(nn.Module, PyTorchModelHubMixin):
         # ----------------------
         #        Encoder
         # ----------------------
-        self.encoder = dinov2_vitl14_reg(pretrained=False)
+        self.encoder = dinov2_vitl14_reg(pretrained=False)  # 禁用预训练权重，使用随机参数重新开始训练 (数据集差异与预训练模型差异较大)
         self.patch_size = 14
-        del self.encoder.mask_token
+        del self.encoder.mask_token                         # 下游任务不需要 DINOv2 中的 mask_token
 
         # ----------------------
         #  Positonal Encoding
         # ----------------------
+        # 默认使用 'rope100'
         self.pos_type = pos_type if pos_type is not None else 'none'
         self.rope=None
         if self.pos_type.startswith('rope'): # eg rope100 
             if RoPE2D is None: raise ImportError("Cannot find cuRoPE2D, please install it following the README instructions")
             freq = float(self.pos_type[len('rope'):])
             self.rope = RoPE2D(freq=freq)
-            self.position_getter = PositionGetter()
+            self.position_getter = PositionGetter()     # 用于获取每个 patch 的二维索引 (u,v)
         else:
             raise NotImplementedError
         
@@ -45,6 +46,7 @@ class Pi3(nn.Module, PyTorchModelHubMixin):
         # ----------------------
         #        Decoder
         # ----------------------
+        # 获取编码器 (DINOv2) 的嵌入维度
         enc_embed_dim = self.encoder.blocks[0].attn.qkv.in_features        # 1024
         if decoder_size == 'small':
             dec_embed_dim = 384
@@ -100,6 +102,7 @@ class Pi3(nn.Module, PyTorchModelHubMixin):
             out_dim=1024,
             rope=self.rope,
         )
+        # point_head 用于对解码出的local点云隐变量进行线性变换
         self.point_head = LinearPts3d(patch_size=14, dec_embed_dim=1024, output_dim=3)
 
         # ----------------------
@@ -129,19 +132,22 @@ class Pi3(nn.Module, PyTorchModelHubMixin):
         self.register_buffer("image_std", image_std)
 
 
+
     def decode(self, hidden, N, H, W):
-        BN, hw, _ = hidden.shape
-        B = BN // N
+        BN, hw, _ = hidden.shape    # (B*N, number of patches, _)
+        B = BN // N                 # 计算初始 batch size
 
         final_output = []
         
-        hidden = hidden.reshape(B*N, hw, -1)
+        hidden = hidden.reshape(B*N, hw, -1)    # reshape 为三个维度
 
+        # 在 Batch 和 Number 维重复，然后 reshape 到三维 ==> (B*N, num_register_tokens, dec_embed_dim)
         register_token = self.register_token.repeat(B, N, 1, 1).reshape(B*N, *self.register_token.shape[-2:])
 
         # Concatenate special tokens with patch tokens
+        # 在 number of patches 拼接 register_token
         hidden = torch.cat([register_token, hidden], dim=1)
-        hw = hidden.shape[1]
+        hw = hidden.shape[1]    # 更新 hw = patch 个数 + num_register_tokens
 
         if self.pos_type.startswith('rope'):
             pos = self.position_getter(B * N, H//self.patch_size, W//self.patch_size, hidden.device)
@@ -170,25 +176,30 @@ class Pi3(nn.Module, PyTorchModelHubMixin):
 
         return torch.cat([final_output[0], final_output[1]], dim=-1), pos.reshape(B*N, hw, -1)
     
+
+
     def forward(self, imgs):
+        # 对输入图像进行归一化
         imgs = (imgs - self.image_mean) / self.image_std
 
-        B, N, _, H, W = imgs.shape
-        patch_h, patch_w = H // 14, W // 14
+        B, N, _, H, W = imgs.shape              # shape: batch, 图片数量, channel, H, W
+        patch_h, patch_w = H // 14, W // 14     # 切成高宽均为原来 1/14 的 patch
         
         # encode by dinov2
-        imgs = imgs.reshape(B*N, _, H, W)
-        hidden = self.encoder(imgs, is_training=True)
+        imgs = imgs.reshape(B*N, _, H, W)              # 将输入的 (B,N) 维度融合为单个 batch 维度
+        hidden = self.encoder(imgs, is_training=True)  # 使用 encoder 进行编码 (DINOv2)
 
         if isinstance(hidden, dict):
             hidden = hidden["x_norm_patchtokens"]
 
         hidden, pos = self.decode(hidden, N, H, W)
 
+        # 根据隐状态分别解码出local点云、置信度mask 和相机位姿 的隐变量
         point_hidden = self.point_decoder(hidden, xpos=pos)
         conf_hidden = self.conf_decoder(hidden, xpos=pos)
         camera_hidden = self.camera_decoder(hidden, xpos=pos)
 
+        # 在下面的计算中禁用混合精度，强制使用FP32
         with torch.amp.autocast(device_type='cuda', enabled=False):
             # local points
             point_hidden = point_hidden.float()

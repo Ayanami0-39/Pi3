@@ -12,6 +12,7 @@ from torch import Tensor
 from torch import nn
 
 
+# 对输入进行缩放
 class LayerScale(nn.Module):
     def __init__(
         self,

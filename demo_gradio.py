@@ -18,6 +18,8 @@ from pi3.utils.basic import load_images_as_tensor
 import trimesh
 import matplotlib
 from scipy.spatial.transform import Rotation
+import torch_tensorrt
+import time
 
 
 """
@@ -56,6 +58,7 @@ def predictions_to_glb(
         conf_thres = 10
 
     print("Building GLB scene")
+    t0 = time.time()
     selected_frame_idx = None
     if filter_by_frames != "all" and filter_by_frames != "All":
         try:
@@ -78,6 +81,9 @@ def predictions_to_glb(
         images = images[selected_frame_idx][None]
         camera_poses = camera_poses[selected_frame_idx][None]
 
+    t1 = time.time()
+    print(f"Step 1: Frame selection and slicing took {t1 - t0:.3f} seconds")
+
     vertices_3d = pred_world_points.reshape(-1, 3)
     # Handle different image formats - check if images need transposing
     if images.ndim == 4 and images.shape[1] == 3:  # NCHW format
@@ -98,6 +104,9 @@ def predictions_to_glb(
 
     vertices_3d = vertices_3d[conf_mask]
     colors_rgb = colors_rgb[conf_mask]
+
+    t2 = time.time()
+    print(f"Step 2: Masking and color prep took {t2 - t1:.3f} seconds")
 
     if vertices_3d is None or np.asarray(vertices_3d).size == 0:
         vertices_3d = np.array([[1, 0, 0]])
@@ -121,6 +130,9 @@ def predictions_to_glb(
 
     scene_3d.add_geometry(point_cloud_data)
 
+    t3 = time.time()
+    print(f"Step 3: Scene and point cloud creation took {t3 - t2:.3f} seconds")
+
     # Prepare 4x4 matrices for camera extrinsics
     num_cameras = len(camera_poses)
 
@@ -134,12 +146,18 @@ def predictions_to_glb(
             # integrate_camera_into_scene(scene_3d, camera_to_world, current_color, scene_scale)
             integrate_camera_into_scene(scene_3d, camera_to_world, current_color, 1.)          # fixed camera size
 
+    t4 = time.time()
+    print(f"Step 4: Camera mesh integration took {t4 - t3:.3f} seconds")
+
     # Rotate scene for better visualize
     align_rotation = np.eye(4)
     align_rotation[:3, :3] = Rotation.from_euler("y", 100, degrees=True).as_matrix()            # plane rotate
     align_rotation[:3, :3] = align_rotation[:3, :3] @ Rotation.from_euler("x", 155, degrees=True).as_matrix()           # roll
     scene_3d.apply_transform(align_rotation)
 
+    t5 = time.time()
+    print(f"Step 5: Scene rotation took {t5 - t4:.3f} seconds")
+    print(f"Total predictions_to_glb time: {t5 - t0:.3f} seconds")
     print("GLB Scene built")
     return scene_3d
 
@@ -291,14 +309,34 @@ def run_model(target_dir, model) -> dict:
 
     # interval = 10 if target_dir.endswith('.mp4') else 1
     interval = 1
-    imgs = load_images_as_tensor(os.path.join(target_dir, "images"), interval=interval).to(device) # (N, 3, H, W)
+    imgs = load_images_as_tensor(os.path.join(target_dir, "images"), interval=interval, PIXEL_LIMIT=255000).to(device) # (N, 3, H, W)
 
     # 3. Infer
     print("Running model inference...")
     dtype = torch.bfloat16
     with torch.no_grad():
         with torch.amp.autocast('cuda', dtype=dtype):
-            predictions = model(imgs[None]) # Add batch dimension
+            # Run inference 10 times and compute average time
+            times = []
+            num_run = 10
+            for _ in range(num_run):
+                torch.cuda.synchronize()
+                t0 = time.time()
+                predictions = model(imgs[None])  # Add batch dimension
+                if _ == 0:
+                    print(f"imgs[None] shape: {imgs[None].shape}")
+                torch.cuda.synchronize()
+                t1 = time.time()
+                times.append(t1 - t0)
+            # Remove top 5 time diffs (slowest runs)
+            times_sorted = sorted(times)
+            if len(times_sorted) > 5:
+                times_filtered = times_sorted[:-5]
+            else:
+                times_filtered = times_sorted
+            avg_time = sum(times_filtered) / len(times_filtered)
+            print(f"Average inference time over {len(times_filtered)} runs (top 5 removed): {avg_time:.4f} seconds")
+
     predictions['images'] = imgs[None].permute(0, 1, 3, 4, 2)
     predictions['conf'] = torch.sigmoid(predictions['conf'])
     edge = depth_edge(predictions['local_points'][..., 2], rtol=0.03)
@@ -555,7 +593,6 @@ skiing = "examples/skiing.mp4"
 # -------------------------------------------------------------------------
 
 if __name__ == '__main__':
-
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     print("Initializing and loading Pi3 model...")
@@ -564,8 +601,11 @@ if __name__ == '__main__':
     # model = Pi3()
     # model.load_state_dict(torcdtype = torch.bfloat16h.load('ckpts/pi3.pt', weights_only=False, map_location=device))
 
-    model.eval()
-    model = model.to(device)
+    # model.eval()
+    # model = model.to(device)
+
+    model = model.to(device).eval()
+    model = torch.compile(model)
 
     theme = gr.themes.Ocean()
     theme.set(
