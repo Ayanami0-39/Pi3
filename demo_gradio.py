@@ -18,7 +18,7 @@ from pi3.utils.basic import load_images_as_tensor
 import trimesh
 import matplotlib
 from scipy.spatial.transform import Rotation
-import torch_tensorrt
+# import torch_tensorrt
 import time
 
 
